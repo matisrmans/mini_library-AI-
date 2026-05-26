@@ -6,6 +6,7 @@ use App\Models\Book;
 use App\Models\Borrowing;
 use App\Models\Reader;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 
 class BorrowingController extends Controller
 {
@@ -30,18 +31,25 @@ class BorrowingController extends Controller
             'borrowed_at' => 'required|date',
         ]);
 
-        $borrowing = Borrowing::create([
-            'book_id' => $validated['book_id'],
-            'reader_id' => $validated['reader_id'],
-            'borrowed_at' => $validated['borrowed_at'],
-        ]);
+        return DB::transaction(function () use ($validated) {
+            $book = Book::where('id', $validated['book_id'])->lockForUpdate()->first();
 
-        $book = Book::find($validated['book_id']);
-        if ($book->available_copies > 0) {
+            if (!$book || $book->available_copies < 1) {
+                return redirect()->back()
+                    ->withInput()
+                    ->withErrors(['book_id' => 'Grāmata nav pieejama aizņemšanai.']);
+            }
+
+            Borrowing::create([
+                'book_id' => $validated['book_id'],
+                'reader_id' => $validated['reader_id'],
+                'borrowed_at' => $validated['borrowed_at'],
+            ]);
+
             $book->decrement('available_copies');
-        }
 
-        return redirect()->route('borrowings.index')->with('success', 'Aizņēmums reģistrēts!');
+            return redirect()->route('borrowings.index')->with('success', 'Aizņēmums reģistrēts!');
+        });
     }
 
     public function show(Borrowing $borrowing)
@@ -65,19 +73,34 @@ class BorrowingController extends Controller
             'returned_at' => 'nullable|date|after_or_equal:borrowed_at',
         ]);
 
-        $borrowing->update($validated);
+        DB::transaction(function () use ($borrowing, $validated) {
+            $wasReturned = $borrowing->returned_at !== null;
+
+            if (($validated['returned_at'] ?? false) && !$wasReturned) {
+                $book = Book::where('id', $borrowing->book_id)->lockForUpdate()->first();
+                $borrowing->update($validated);
+                if ($book) {
+                    $book->increment('available_copies');
+                }
+            } else {
+                $borrowing->update($validated);
+            }
+        });
 
         return redirect()->route('borrowings.index')->with('success', 'Aizņēmums atjaunināts!');
     }
 
     public function destroy(Borrowing $borrowing)
     {
-        $book = $borrowing->book;
-        $borrowing->delete();
+        DB::transaction(function () use ($borrowing) {
+            $book = Book::where('id', $borrowing->book_id)->lockForUpdate()->first();
 
-        if ($book && !$borrowing->returned_at) {
-            $book->increment('available_copies');
-        }
+            $borrowing->delete();
+
+            if ($book && !$borrowing->returned_at) {
+                $book->increment('available_copies');
+            }
+        });
 
         return redirect()->route('borrowings.index')->with('success', 'Aizņēmums dzēsts!');
     }
